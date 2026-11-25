@@ -1,77 +1,77 @@
-# Bateria dos Periféricos
+# Battery Checker
 
-Ícones na bandeja do Windows com a bateria do mouse, do teclado e do fone. Cada um ganha seu próprio ícone com a porcentagem (e uma letra no canto: **M**, **T** ou **F**), e você recebe uma notificação do Windows quando cada um passa de **50%**, **25%** e **10%**.
+Windows tray icons showing the battery level of your wireless mouse, keyboard and headset. Each device gets its own icon with the percentage (and a letter in the corner: **M**, **K** or **H**), and you get a Windows notification when each one drops below **50%**, **25%** and **10%**.
 
-Cores: verde acima de 50% · amarelo de 30 a 50% · laranja de 15 a 29% · vermelho abaixo de 15% · cinza sem resposta. Quando o aparelho está carregando, aparece um raio amarelo ao lado do número (e a dica do ícone mostra "carregando").
+Colors: green above 50% · yellow 30–50% · orange 15–29% · red below 15% · grey when the device doesn't answer. While a device is charging, a yellow lightning bolt appears next to the number (and the icon tooltip says "charging").
 
-## Aparelhos suportados
+## Supported devices
 
-| Aparelho | Como é lido |
+| Device | How it's read |
 |---|---|
-| Mouse VXE (R1, R1 Pro, R1 SE+, Pro Max…) pelo dongle 2.4G | protocolo Kysona/Compx |
-| Teclado AULA pelo receptor Compx 3554:FA09 | protocolo Compx (F87 Pro/F99 Pro confirmados; o F75 provavelmente usa o mesmo receptor) |
-| Fone Corsair Virtuoso (RGB Wireless, SE, XT, MAX) e Void pelo dongle | protocolo Corsair/Bragi (vindo do HeadsetControl) |
+| VXE mice (R1, R1 Pro, R1 SE+, Pro Max…) through the 2.4G dongle | Kysona/Compx protocol |
+| AULA keyboards through the Compx receiver 3554:FA09 (tested with the F75; F87 Pro/F99 Pro also reported) | Compx protocol |
+| Corsair Virtuoso (RGB Wireless, SE, XT, MAX) and Void headsets through the dongle | Corsair/Bragi protocol (from HeadsetControl) |
 
-## Instalação
+## Installation
 
-1. Instale o Python 3.10+ em https://www.python.org/downloads/ e marque **"Add Python to PATH"**.
-2. Abra o PowerShell nesta pasta e rode:
+1. Install Python 3.10+ from https://www.python.org/downloads/ and tick **"Add Python to PATH"** (or run `winget install -e --id Python.Python.3.12 --scope user`).
+2. Open PowerShell in this folder and run:
    ```powershell
-   pip install -r requirements.txt
+   python -m pip install -r requirements.txt
    ```
-3. **Faça o teste primeiro** (com os três aparelhos ligados, mexa no mouse antes):
+3. **Test it first** (turn all devices on and move the mouse so it wakes up):
    ```powershell
-   python bateria_perifericos.py --scan
+   python battery_checker.py --scan
    ```
-   Cada aparelho reconhecido mostra uma linha `>> Mouse: 72%`, por exemplo.
-4. Se der certo, rode na bandeja:
+   Every recognized device prints a line such as `>> Mouse: 72%`.
+4. If that works, run it in the tray:
    ```powershell
-   pythonw bateria_perifericos.py
+   Start-Process pythonw -ArgumentList "battery_checker.py"
    ```
-5. Clique com o botão direito em qualquer ícone e marque **Iniciar com o Windows**.
+5. Right-click any icon and tick **Start with Windows**.
 
-> Dica: no Windows 11 os ícones novos ficam escondidos na setinha `^`. Vá em **Configurações → Personalização → Barra de tarefas → Outros ícones da bandeja do sistema** e ative os três `python`/`BateriaPerifericos`.
+> Tip: Windows 11 hides new tray icons behind the `^` arrow. Go to **Settings → Personalization → Taskbar → Other system tray icons** and turn on the Python icons.
 
-## Menu do ícone
+## Icon menu
 
-- **Atualizar agora** (ou clique duplo): lê as baterias na hora.
-- **Iniciar com o Windows**: liga/desliga o início automático.
-- **Abrir configuração**: abre o `config.json`.
-- **Sair**.
+- **Refresh now** (or double-click): reads the batteries right away.
+- **Start with Windows**: toggles autostart.
+- **Open settings**: opens `config.json`.
+- **Quit**.
 
-## Configuração
+## Settings
 
-Fica em `%APPDATA%\BateriaPerifericos\config.json`:
+Stored in `%APPDATA%\BatteryChecker\config.json`:
 
 ```json
 {
-  "limites": [50, 25, 10],
-  "intervalo_segundos": 300,
-  "histerese": 5,
-  "nomes": { "3554:f58a": "Mouse VXE R1" }
+  "thresholds": [50, 25, 10],
+  "interval_seconds": 300,
+  "hysteresis": 5,
+  "names": { "3554:f58a": "VXE R1 mouse" }
 }
 ```
 
-- `limites`: porcentagens que geram aviso. Cada uma avisa **uma vez**; volta a valer quando você coloca para carregar ou quando a bateria sobe 5% acima dela.
-- `intervalo_segundos`: de quanto em quanto tempo ler (padrão 5 min).
-- `nomes`: troca o nome mostrado. A chave `VID:PID` aparece no `--scan`.
+- `thresholds`: percentages that trigger a notification. Each one fires **once**; it re-arms when you plug the device in or when the battery climbs 5% above it.
+- `interval_seconds`: how often to read the batteries (default 5 min). Use `60` if you want the charging bolt to show up faster.
+- `names`: overrides the displayed name. The `VID:PID` key is shown by `--scan`.
 
-Reinicie o app depois de editar.
+Restart the app after editing.
 
-## Se algum aparelho não aparecer
+## Troubleshooting
 
-- **Mouse VXE sem resposta**: ele dorme rápido. Mexa nele e clique em *Atualizar agora*. Se o ATK HUB estiver aberto, feche-o (os dois disputam o dongle).
-- **Fone Corsair sem resposta**: o iCUE aberto às vezes "rouba" as respostas. Teste com o iCUE fechado.
-- **Teclado AULA não reconhecido**: o receptor do seu F75 pode ser diferente do 3554:FA09. Rode `python bateria_perifericos.py --scan` e me mande a lista que aparece; dá para adicionar o protocolo dele.
+- **VXE mouse not answering**: it sleeps quickly. Move it and click *Refresh now*. Close ATK HUB if it's open (they fight over the dongle).
+- **Corsair headset not answering**: a running iCUE sometimes swallows the replies. Try with iCUE closed.
+- **AULA keyboard not recognized**: your receiver may not be the 3554:FA09. Run `python battery_checker.py --scan` and check which devices show up.
 
-## Gerar um .exe (opcional)
+## Building an .exe (optional)
 
 ```powershell
-pip install pyinstaller
-pyinstaller --onefile --noconsole --name BateriaPerifericos bateria_perifericos.py
+python -m pip install pyinstaller
+pyinstaller --onefile --noconsole --name BatteryChecker battery_checker.py
 ```
 
-O executável fica em `dist\BateriaPerifericos.exe`. Para o diagnóstico continue usando a versão `.py` com `--scan` (o .exe não tem console).
+The executable ends up in `dist\BatteryChecker.exe`. For diagnostics keep using the `.py` with `--scan` (the .exe has no console).
 
 ---
-Protocolos adaptados do [Battery Hub](https://github.com/battery-hub/battery-hub) (licença MIT), que se baseou nos drivers hid-kysona/hid-pulsar do Linux, no HeadsetControl e no AulaF87ProBattery.
+Protocols adapted from [Battery Hub](https://github.com/battery-hub/battery-hub) (MIT license), which builds on the Linux hid-kysona/hid-pulsar drivers, HeadsetControl and AulaF87ProBattery.

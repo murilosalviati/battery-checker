@@ -1,16 +1,17 @@
 """
-Bateria dos Periféricos — indicador na bandeja do Windows.
+Battery Checker — Windows tray indicator for wireless peripherals.
 
-Mostra um ícone por periférico (mouse VXE, teclado AULA, fone Corsair) com a
-porcentagem da bateria e avisa quando cada um passa de 50%, 25% e 10%.
+Shows one tray icon per peripheral (VXE mouse, AULA keyboard, Corsair headset)
+with its battery percentage, and sends a notification when each one drops
+below 50%, 25% and 10%.
 
-Protocolos portados do projeto Battery Hub (MIT, github.com/battery-hub/battery-hub),
-que por sua vez se baseou em hid-kysona/hid-pulsar (Linux), HeadsetControl e
+Protocols ported from Battery Hub (MIT, github.com/battery-hub/battery-hub),
+which in turn builds on hid-kysona/hid-pulsar (Linux), HeadsetControl and
 AulaF87ProBattery.
 
-Uso:
-    pythonw bateria_perifericos.py          # roda na bandeja
-    python  bateria_perifericos.py --scan   # diagnóstico no terminal
+Usage:
+    pythonw battery_checker.py          # run in the tray
+    python  battery_checker.py --scan   # diagnostics in the terminal
 """
 from __future__ import annotations
 
@@ -25,23 +26,31 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 try:
-    import hid  # pacote "hidapi"
-except ImportError:  # deixa os testes de lógica rodarem sem hidapi
+    import hid  # "hidapi" package
+except ImportError:  # lets the logic tests run without hidapi
     hid = None
 
-APP_NAME = "BateriaPerifericos"
-CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+APP_NAME = "BatteryChecker"
+APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
+CONFIG_DIR = os.path.join(APPDATA, APP_NAME)
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-STATE_PATH = os.path.join(CONFIG_DIR, "estado.json")
+STATE_PATH = os.path.join(CONFIG_DIR, "state.json")
+
+# Earlier (Portuguese) version of this app; its settings are migrated on first run.
+LEGACY_NAME = "BateriaPerifericos"
+LEGACY_CONFIG_PATH = os.path.join(APPDATA, LEGACY_NAME, "config.json")
+LEGACY_CONFIG_KEYS = {"limites": "thresholds", "intervalo_segundos": "interval_seconds",
+                      "histerese": "hysteresis", "nomes": "names"}
 
 DEFAULT_CONFIG = {
-    "limites": [50, 25, 10],      # porcentagens que geram notificação
-    "intervalo_segundos": 300,    # de quanto em quanto tempo ler as baterias
-    "histerese": 5,               # precisa subir limite+5% para o aviso "rearmar"
-    "nomes": {},                  # ex.: {"3554:f58a": "Mouse VXE R1"}
+    "thresholds": [50, 25, 10],   # percentages that trigger a notification
+    "interval_seconds": 300,      # how often to read the batteries
+    "hysteresis": 5,              # level must rise threshold+5% before that alert re-arms
+    "names": {},                  # e.g. {"3554:f58a": "VXE R1 mouse"}
 }
 
-KIND_LABEL = {"mouse": "Mouse", "keyboard": "Teclado", "headset": "Fone"}
+KIND_LABEL = {"mouse": "Mouse", "keyboard": "Keyboard", "headset": "Headset"}
+KIND_LETTER = {"mouse": "M", "keyboard": "K", "headset": "H"}
 
 
 # --------------------------------------------------------------------------- HID helpers
@@ -83,7 +92,7 @@ class WriteError(OSError):
 
 
 def list_devices() -> list[Device]:
-    """Agrupa as coleções HID por VID:PID (um produto aparece como várias coleções)."""
+    """Groups HID collections by VID:PID (one product shows up as several collections)."""
     devices: dict[tuple[int, int], Device] = {}
     for info in hid.enumerate():
         k = (info["vendor_id"], info["product_id"])
@@ -101,7 +110,7 @@ def pad(data: list[int], length: int) -> list[int]:
 
 
 class Handle:
-    """Handle HID aberto, com leitura com timeout."""
+    """Open HID handle with timed reads."""
 
     def __init__(self, path: bytes):
         self.path = path
@@ -113,7 +122,7 @@ class Handle:
             raise WriteError("cannot write")
 
     def read(self, timeout_ms: int) -> list[int]:
-        # timeout 0 no hidapi = leitura bloqueante; usa 1 ms no mínimo
+        # a 0 timeout in hidapi means a blocking read; use at least 1 ms
         return list(self.dev.read(256, max(1, timeout_ms)) or [])
 
     def drain(self) -> None:
@@ -135,8 +144,8 @@ class Handle:
 
 
 def set_output_report(path: bytes, reports: list[list[int]]) -> int:
-    """Envia relatórios com HidD_SetOutputReport (transferência de controle).
-    Alguns receptores (AULA/Compx na bateria) ignoram o mesmo relatório enviado com WriteFile."""
+    """Sends reports with HidD_SetOutputReport (control transfer).
+    Some receivers (AULA/Compx battery) ignore the same report sent with WriteFile."""
     if sys.platform != "win32":
         return 0
     k32 = ctypes.windll.kernel32
@@ -159,8 +168,8 @@ def set_output_report(path: bytes, reports: list[list[int]]) -> int:
 
 
 # --------------------------------------------------------------------------- VXE (Kysona/Compx mouse)
-# Pedido: relatório 0x08, sub-comando 0x04, checksum fixo 0x49. Resposta: byte 6 = %,
-# byte 7 = carregando, bytes 8-9 = mV. O status (0x03) diz se o receptor enxerga o mouse.
+# Request: report 0x08, sub-command 0x04, fixed checksum 0x49. Reply: byte 6 = %,
+# byte 7 = charging, bytes 8-9 = mV. Status (0x03) tells whether the receiver sees the mouse.
 
 class Kysona:
     kind = "mouse"
@@ -186,7 +195,7 @@ class Kysona:
         if len(f) < 10 or f[0] != 0x08 or f[1] != 0x04:
             return None
         if not (0 < f[6] <= 100):
-            return None  # quadro zerado de "ainda não pronto"
+            return None  # all-zero "not ready yet" frame
         return Reading(capacity=f[6], charging=bool(f[7]))
 
     @staticmethod
@@ -205,9 +214,9 @@ class Kysona:
         for ch in main + others:
             try:
                 return cls._read_from(ch)
-            except WriteError as e:  # canal recusou o pedido: tenta a próxima coleção
+            except WriteError as e:  # channel refused the request: try the next collection
                 last = e
-        raise last or OSError("sem canal de comando")
+        raise last or OSError("no command channel")
 
     @classmethod
     def _read_from(cls, ch: Channel) -> Reading:
@@ -235,12 +244,12 @@ class Kysona:
                     connected = False
                     off_in_a_row += 1
                     if off_in_a_row >= 2:
-                        raise DeviceOff("mouse desligado")
-        raise TimeoutError("mouse não respondeu (dormindo?)")
+                        raise DeviceOff("mouse is off")
+        raise TimeoutError("mouse did not answer (asleep?)")
 
 
-# --------------------------------------------------------------------------- AULA (receptor Compx 3554:fa09)
-# Quadros de 20 bytes no relatório 0x13; último byte = soma dos 19 anteriores.
+# --------------------------------------------------------------------------- AULA (Compx receiver 3554:fa09)
+# 20-byte frames on report 0x13; last byte = sum of the previous 19.
 
 class Compx:
     kind = "keyboard"
@@ -311,14 +320,14 @@ class Compx:
             r = listen(1.5, True)
             if r:
                 return r
-            # Plano B: mesmos pedidos via HidD_SetOutputReport, lendo a resposta neste handle.
+            # Fallback: same requests via HidD_SetOutputReport, reading the reply on this handle.
             t = threading.Thread(target=set_output_report, args=(ch.path, cls.requests()), daemon=True)
             t.start()
             r = listen(2.5, False)
             t.join(3)
             if r:
                 return r
-        raise TimeoutError("teclado não respondeu" if answered else "receptor não respondeu")
+        raise TimeoutError("keyboard did not answer" if answered else "receiver did not answer")
 
 
 # --------------------------------------------------------------------------- Corsair Virtuoso / Void
@@ -351,11 +360,11 @@ def _void_accept(f):
 
 
 def _bragi_status(v):
-    # propriedade 0x10: 1 = carregando, 2 = descarregando, 3 = carga completa (no cabo)
+    # property 0x10: 1 = charging, 2 = discharging, 3 = fully charged (on cable)
     return Reading(charging=v in (1, 3)) if v in (1, 2, 3) else None
 
 
-_ok = lambda v: Reading()  # passos de "acordar" sem valor útil
+_ok = lambda v: Reading()  # wake-up steps with no useful value
 
 CORSAIR_ENTRIES = [
     {   # Virtuoso MAX, Void Wireless v2, HS80 MAX
@@ -369,7 +378,7 @@ CORSAIR_ENTRIES = [
         "steps": [_bragi_step([], 0x09, 0x0F, _bragi_battery)],
         "optional": [_bragi_step([], 0x09, 0x10, _bragi_status)],
     },
-    {   # Virtuoso RGB Wireless original e Void
+    {   # original Virtuoso RGB Wireless and Void
         "pids": {0x1B1C, 0x1B27, 0x0A14, 0x0A16, 0x0A17, 0x0A1D, 0x0A1A, 0x1B2A, 0x1B23, 0x1B29,
                  0x0A55, 0x0A51, 0x0A52, 0x0A38, 0x0A4F, 0x0A2B, 0x0A75, 0x0A56},
         "page": 0xFFC5, "usage": 0x01, "iface": 3,
@@ -405,7 +414,7 @@ class Corsair:
     @classmethod
     def read(cls, dev: Device) -> Reading:
         e = cls.entry(dev)
-        last = TimeoutError("fone não respondeu")
+        last = TimeoutError("headset did not answer")
         for ch in cls.channels(dev, e):
             try:
                 with Handle(ch.path) as h:
@@ -417,14 +426,14 @@ class Corsair:
                         while time.time() < end and part is None:
                             part = accept(h.read(100))
                         if part is None:
-                            raise TimeoutError("fone não respondeu")
+                            raise TimeoutError("headset did not answer")
                         if part == "off":
-                            raise DeviceOff("fone desligado")
+                            raise DeviceOff("headset is off")
                         if part.capacity is not None:
                             result.capacity = part.capacity
                         if part.charging is not None:
                             result.charging = part.charging
-                    # extras que não derrubam a leitura se o fone não responder (ex.: carregando)
+                    # extras that don't fail the reading if the headset ignores them (e.g. charging)
                     for request, accept in e.get("optional", []):
                         try:
                             h.drain()
@@ -465,12 +474,12 @@ def read_device(dev: Device) -> Reading:
         return Reading(offline=True, error=str(e) or type(e).__name__)
 
 
-# --------------------------------------------------------------------------- Limites e notificações
+# --------------------------------------------------------------------------- Thresholds and notifications
 
 def thresholds_to_notify(level: int, charging: bool, notified: set, limits: list[int], hysteresis: int):
-    """Devolve (limite a avisar ou None, novo conjunto de limites já avisados).
-    Avisa uma vez por limite; se pular vários de uma vez (60%→20%), avisa só o mais baixo.
-    O aviso 'rearma' quando carrega ou quando o nível volta acima de limite + histerese."""
+    """Returns (threshold to notify or None, new set of already-notified thresholds).
+    Notifies once per threshold; if several are crossed at once (60%→20%), only the lowest.
+    An alert re-arms when charging or when the level climbs back above threshold + hysteresis."""
     notified = set(notified)
     if charging:
         return None, set()
@@ -487,7 +496,7 @@ def thresholds_to_notify(level: int, charging: bool, notified: set, limits: list
 
 def load_json(path, default):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
         if isinstance(default, dict):
             return {**default, **data}
@@ -504,14 +513,12 @@ def save_json(path, data):
     os.replace(tmp, path)
 
 
-# --------------------------------------------------------------------------- Ícones
+# --------------------------------------------------------------------------- Icons
 
-def level_color(level, charging, offline):
-    """Verde acima de 50 · amarelo 30-50 · laranja 15-29 · vermelho abaixo de 15."""
+def level_color(level, offline):
+    """Green above 50 · yellow 30-50 · orange 15-29 · red below 15 · grey when unreachable."""
     if offline or level is None:
         return (110, 110, 110)
-    if charging:
-        return (40, 120, 220)
     if level > 50:
         return (46, 160, 67)
     if level >= 30:
@@ -532,15 +539,15 @@ def _font(size):
 
 
 def make_icon(level, charging, offline, kind):
-    """Quadrado na cor do nível com a porcentagem; um raio no canto quando está carregando."""
+    """Square in the level's color with the percentage; a lightning bolt when charging."""
     from PIL import Image, ImageDraw
-    S = 4  # desenha em 256 px e reduz, para bordas suaves
+    S = 4  # draw at 256 px and scale down for smooth edges
     img = Image.new("RGBA", (64 * S, 64 * S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle((0, 0, 63 * S, 63 * S), radius=12 * S, fill=level_color(level, False, offline))
+    d.rounded_rectangle((0, 0, 63 * S, 63 * S), radius=12 * S, fill=level_color(level, offline))
     text = "?" if level is None else str(level)
     chg = charging and not offline
-    if chg:  # número menor para caber o raio do lado direito
+    if chg:  # smaller number to make room for the bolt on the right
         font = _font((34 if len(text) <= 1 else 30 if len(text) == 2 else 22) * S)
     else:
         font = _font((40 if len(text) <= 2 else 30) * S)
@@ -551,12 +558,12 @@ def make_icon(level, charging, offline, kind):
     if chg:
         bolt = [(52, 3), (40, 30), (49, 30), (45, 52), (61, 22), (52, 22), (58, 3)]
         d.polygon([(x * S, y * S) for x, y in bolt], fill=(255, 230, 70, 255), outline=(30, 20, 0, 255), width=3 * S)
-    # letra do tipo no canto (M/T/F) para distinguir os ícones
-    d.text((47 * S, 46 * S), {"mouse": "M", "keyboard": "T", "headset": "F"}[kind], font=_font(14 * S), fill=(255, 255, 255, 230))
+    # device-type letter in the corner (M/K/H) to tell the icons apart
+    d.text((47 * S, 46 * S), KIND_LETTER[kind], font=_font(14 * S), fill=(255, 255, 255, 230))
     return img.resize((64, 64), Image.LANCZOS)
 
 
-# --------------------------------------------------------------------------- Início com o Windows
+# --------------------------------------------------------------------------- Start with Windows
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -570,52 +577,72 @@ def _launch_command():
     return f'"{exe}" "{os.path.abspath(__file__)}"'
 
 
-def autostart_enabled():
+def _run_value_exists(name):
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            winreg.QueryValueEx(k, APP_NAME)
+            winreg.QueryValueEx(k, name)
             return True
     except OSError:
         return False
 
 
-def set_autostart(enable: bool):
+def autostart_enabled():
+    return _run_value_exists(APP_NAME)
+
+
+def set_autostart(enable: bool, name: str = APP_NAME):
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if enable:
-            winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, _launch_command())
+            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, _launch_command())
         else:
             try:
-                winreg.DeleteValue(k, APP_NAME)
+                winreg.DeleteValue(k, name)
             except OSError:
                 pass
 
 
-# --------------------------------------------------------------------------- App de bandeja
+# --------------------------------------------------------------------------- Migration from the Portuguese version
+
+def migrate_legacy():
+    """Carries settings and autostart over from the old 'BateriaPerifericos' version."""
+    if not os.path.exists(CONFIG_PATH) and os.path.exists(LEGACY_CONFIG_PATH):
+        old = load_json(LEGACY_CONFIG_PATH, {})
+        new = dict(DEFAULT_CONFIG)
+        for pt, en in LEGACY_CONFIG_KEYS.items():
+            if pt in old:
+                new[en] = old[pt]
+        save_json(CONFIG_PATH, new)
+    if sys.platform == "win32" and _run_value_exists(LEGACY_NAME):
+        set_autostart(False, LEGACY_NAME)
+        set_autostart(True)
+
+
+# --------------------------------------------------------------------------- Tray app
 
 class TrayApp:
     def __init__(self):
         self.config = load_json(CONFIG_PATH, DEFAULT_CONFIG)
         if not os.path.exists(CONFIG_PATH):
             save_json(CONFIG_PATH, self.config)
-        self.state = load_json(STATE_PATH, {})   # key -> {"avisados": [...], "nivel": n, "hora": "..."}
+        self.state = load_json(STATE_PATH, {})   # key -> {"notified": [...], "level": n, "time": "..."}
         self.icons = {}                           # key -> pystray.Icon
         self.refresh_now = threading.Event()
         self.quit = threading.Event()
 
     def label(self, dev, kind):
-        custom = self.config.get("nomes", {}).get(dev.key)
+        custom = self.config.get("names", {}).get(dev.key)
         return custom or f"{KIND_LABEL[kind]} ({dev.name})"
 
     def menu(self):
         import pystray
         return pystray.Menu(
-            pystray.MenuItem("Atualizar agora", lambda: self.refresh_now.set(), default=True),
-            pystray.MenuItem("Iniciar com o Windows", self.toggle_autostart,
+            pystray.MenuItem("Refresh now", lambda: self.refresh_now.set(), default=True),
+            pystray.MenuItem("Start with Windows", self.toggle_autostart,
                              checked=lambda item: autostart_enabled()),
-            pystray.MenuItem("Abrir configuração", lambda: os.startfile(CONFIG_PATH)),
-            pystray.MenuItem("Sair", self.stop),
+            pystray.MenuItem("Open settings", lambda: os.startfile(CONFIG_PATH)),
+            pystray.MenuItem("Quit", self.stop),
         )
 
     def toggle_autostart(self, icon, item):
@@ -643,29 +670,29 @@ class TrayApp:
     def update_device(self, dev, drv, r: Reading):
         key, kind = dev.key, drv.kind
         name = self.label(dev, kind)
-        st = self.state.setdefault(key, {"avisados": []})
+        st = self.state.setdefault(key, {"notified": []})
         if r.capacity is not None:
-            st["nivel"], st["carregando"] = r.capacity, bool(r.charging)
-            st["hora"] = datetime.now().strftime("%H:%M")
-        level = st.get("nivel")
+            st["level"], st["charging"] = r.capacity, bool(r.charging)
+            st["time"] = datetime.now().strftime("%H:%M")
+        level = st.get("level")
         if r.offline:
-            extra = f" — sem resposta ({r.error})" if level is None else f" — última leitura {st.get('hora')}"
+            extra = f" — no response ({r.error})" if level is None else f" — last reading {st.get('time')}"
             title = f"{name}: {'?' if level is None else f'{level}%'}{extra}"
         else:
-            title = f"{name}: {level}%" + (" (carregando)" if r.charging else "")
-        ic = self.ensure_icon(key, title, make_icon(level, bool(st.get("carregando")) and not r.offline, r.offline, kind))
+            title = f"{name}: {level}%" + (" (charging)" if r.charging else "")
+        ic = self.ensure_icon(key, title, make_icon(level, bool(st.get("charging")) and not r.offline, r.offline, kind))
 
         if r.capacity is not None:
             limit, notified = thresholds_to_notify(
-                r.capacity, bool(r.charging), set(st.get("avisados", [])),
-                self.config["limites"], self.config.get("histerese", 5))
-            st["avisados"] = sorted(notified)
+                r.capacity, bool(r.charging), set(st.get("notified", [])),
+                self.config["thresholds"], self.config.get("hysteresis", 5))
+            st["notified"] = sorted(notified)
             if limit is not None:
-                msg = f"{name} está com {r.capacity}% de bateria."
+                msg = f"{name} is at {r.capacity}% battery."
                 if limit <= 10:
-                    msg += " Coloque para carregar agora."
+                    msg += " Plug it in now."
                 try:
-                    ic.notify(msg, f"Bateria {KIND_LABEL[kind].lower()} abaixo de {limit}%")
+                    ic.notify(msg, f"{KIND_LABEL[kind]} battery below {limit}%")
                 except Exception:
                     pass
         save_json(STATE_PATH, self.state)
@@ -678,8 +705,8 @@ class TrayApp:
                     if drv:
                         self.update_device(dev, drv, read_device(dev))
             except Exception as e:
-                print("erro no ciclo:", e, file=sys.stderr)
-            self.refresh_now.wait(self.config.get("intervalo_segundos", 300))
+                print("poll error:", e, file=sys.stderr)
+            self.refresh_now.wait(self.config.get("interval_seconds", 300))
             self.refresh_now.clear()
 
     def run(self):
@@ -688,26 +715,26 @@ class TrayApp:
             pass
 
 
-# --------------------------------------------------------------------------- Diagnóstico
+# --------------------------------------------------------------------------- Diagnostics
 
 def scan():
     devs = list_devices()
-    print(f"{len(devs)} dispositivos HID encontrados.\n")
+    print(f"{len(devs)} HID devices found.\n")
     for dev in sorted(devs, key=lambda d: d.key):
         drv = driver_for(dev)
         vendor_pages = sorted({f"{c.usage_page:04x}/{c.usage:04x}" for c in dev.channels if c.usage_page >= 0xFF00})
         if not drv and not vendor_pages:
             continue
         print(f"[{dev.key}] {dev.name}")
-        print(f"    coleções de fabricante: {', '.join(vendor_pages) or '-'}")
+        print(f"    vendor collections: {', '.join(vendor_pages) or '-'}")
         if drv:
             r = read_device(dev)
             if r.capacity is not None:
-                print(f"    >> {KIND_LABEL[drv.kind]}: {r.capacity}%{' (carregando)' if r.charging else ''}")
+                print(f"    >> {KIND_LABEL[drv.kind]}: {r.capacity}%{' (charging)' if r.charging else ''}")
             else:
-                print(f"    >> {KIND_LABEL[drv.kind]}: sem leitura ({r.error})")
+                print(f"    >> {KIND_LABEL[drv.kind]}: no reading ({r.error})")
         else:
-            print("    (não reconhecido)")
+            print("    (not recognized)")
         print()
 
 
@@ -715,7 +742,7 @@ _mutex = None
 
 
 def single_instance() -> bool:
-    """Garante uma única cópia rodando na bandeja (mutex nomeado do Windows)."""
+    """Makes sure only one copy runs in the tray (Windows named mutex)."""
     global _mutex
     if sys.platform != "win32":
         return True
@@ -725,16 +752,17 @@ def single_instance() -> bool:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Bateria dos periféricos na bandeja do Windows")
-    p.add_argument("--scan", action="store_true", help="lista dispositivos e tenta ler a bateria")
+    p = argparse.ArgumentParser(description="Peripheral battery levels in the Windows tray")
+    p.add_argument("--scan", action="store_true", help="list devices and try to read their battery")
     args = p.parse_args()
     if hid is None:
-        sys.exit("Instale as dependências: pip install -r requirements.txt")
+        sys.exit("Install the dependencies: pip install -r requirements.txt")
     if args.scan:
         scan()
     else:
         if not single_instance():
-            sys.exit(0)  # já tem um rodando: não cria ícones duplicados
+            sys.exit(0)  # already running: don't create duplicate icons
+        migrate_legacy()
         TrayApp().run()
 
 
